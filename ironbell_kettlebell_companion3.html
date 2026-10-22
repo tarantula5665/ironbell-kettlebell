@@ -1,0 +1,1711 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IronBell - Single Kettlebell Companion App</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            orange: '#FF5722',
+                            amber: '#F59E0B',
+                            cyan: '#06B6D4',
+                            emerald: '#10B981',
+                            dark: '#0F172A',
+                            card: '#1E293B'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+        body {
+            font-family: 'Prompt', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+        }
+        .progress-ring-circle {
+            transition: stroke-dashoffset 0.35s;
+            transform: rotate(-90deg);
+            transform-origin: 50% 50%;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+    </style>
+
+    <!-- FIREBASE MODULES -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInWithPopup, 
+            GoogleAuthProvider, 
+            signOut, 
+            onAuthStateChanged,
+            signInAnonymously,
+            signInWithCustomToken
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            getDocs, 
+            deleteDoc, 
+            doc, 
+            query, 
+            onSnapshot 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase state & fallback
+        window.firebaseApp = null;
+        window.firebaseAuth = null;
+        window.firebaseDb = null;
+        window.currentUser = null;
+        window.isLocalFallbackMode = false;
+
+        // Firebase Initialization with Error Safe Guarding
+        async function initFirebaseSafely() {
+            try {
+                // Check if environment provided valid firebase config
+                const rawConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+                let config = null;
+                if (rawConfig) {
+                    try { config = JSON.parse(rawConfig); } catch(e) {}
+                }
+
+                // If missing or invalid dummy placeholder API key, use fallback mode immediately
+                if (!config || !config.apiKey || config.apiKey.includes('placeholder') || config.apiKey === 'YOUR_API_KEY') {
+                    enableLocalFallback("Using local offline storage mode.");
+                    return;
+                }
+
+                const app = initializeApp(config);
+                const auth = getAuth(app);
+                const db = getFirestore(app);
+
+                window.firebaseApp = app;
+                window.firebaseAuth = auth;
+                window.firebaseDb = db;
+
+                // Attempt initial auth
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token).catch(() => signInAnonymously(auth));
+                } else {
+                    await signInAnonymously(auth).catch(() => {});
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user && !window.isLocalFallbackMode) {
+                        window.currentUser = {
+                            uid: user.uid,
+                            displayName: user.displayName || 'IronBell User',
+                            email: user.email || '',
+                            photoURL: user.photoURL || null,
+                            isAnonymous: user.isAnonymous
+                        };
+                        updateUserUI();
+                        loadWorkoutHistory();
+                    }
+                });
+
+            } catch (err) {
+                console.warn("Firebase Init Warning:", err.message);
+                enableLocalFallback("Local storage mode activated.");
+            }
+        }
+
+        function enableLocalFallback(reason) {
+            window.isLocalFallbackMode = true;
+            console.log("Local Fallback Active:", reason);
+            
+            // Check stored mock user or create guest user
+            const savedUser = localStorage.getItem('ironbell_user');
+            if (savedUser) {
+                try {
+                    window.currentUser = JSON.parse(savedUser);
+                } catch(e) {
+                    window.currentUser = createMockGuestUser();
+                }
+            } else {
+                window.currentUser = createMockGuestUser();
+            }
+
+            updateUserUI();
+            loadWorkoutHistory();
+        }
+
+        function createMockGuestUser(name = 'Iron Athlete', email = 'athlete@ironbell.app') {
+            const user = {
+                uid: 'local_' + Math.random().toString(36).substring(2, 9),
+                displayName: name,
+                email: email,
+                photoURL: null,
+                isGuest: true
+            };
+            localStorage.setItem('ironbell_user', JSON.stringify(user));
+            return user;
+        }
+
+        // Global safe Auth methods attached to window for UI buttons
+        window.handleGoogleLogin = async function() {
+            if (window.firebaseAuth && !window.isLocalFallbackMode) {
+                try {
+                    const provider = new GoogleAuthProvider();
+                    await signInWithPopup(window.firebaseAuth, provider);
+                    showNotification("Logged in successfully with Google!");
+                    return;
+                } catch (error) {
+                    console.warn("Google Auth failed, switching seamlessly to simulated login:", error.message);
+                }
+            }
+
+            // Fallback UI Simulation for Google Auth without breaking app
+            window.currentUser = {
+                uid: 'google_sim_' + Date.now(),
+                displayName: 'Demo Athlete (Google)',
+                email: 'athlete.demo@gmail.com',
+                photoURL: 'https://placehold.co/100x100/ea580c/ffffff?text=GA',
+                isGuest: false
+            };
+            localStorage.setItem('ironbell_user', JSON.stringify(window.currentUser));
+            window.isLocalFallbackMode = true;
+            updateUserUI();
+            loadWorkoutHistory();
+            showNotification("Signed in via Quick Auth (Local Mode)!");
+        };
+
+        window.handleLogout = async function() {
+            if (window.firebaseAuth && !window.isLocalFallbackMode) {
+                try { await signOut(window.firebaseAuth); } catch(e){}
+            }
+            localStorage.removeItem('ironbell_user');
+            window.currentUser = createMockGuestUser();
+            updateUserUI();
+            loadWorkoutHistory();
+            showNotification("Signed out successfully.");
+        };
+
+        // Standardized storage loader (handles both Firestore & LocalStorage)
+        window.loadWorkoutHistory = async function() {
+            const historyList = document.getElementById('history-list');
+            if (!historyList) return;
+
+            let records = [];
+
+            if (!window.isLocalFallbackMode && window.firebaseDb && window.currentUser && !window.currentUser.isGuest) {
+                try {
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'ironbell-app';
+                    const historyRef = collection(window.firebaseDb, 'artifacts', appId, 'users', window.currentUser.uid, 'workouts');
+                    const snapshot = await getDocs(historyRef);
+                    snapshot.forEach(docSnap => {
+                        records.push({ id: docSnap.id, ...docSnap.data() });
+                    });
+                } catch(e) {
+                    console.warn("Firestore fetch error, reading local:", e);
+                    records = getLocalRecords();
+                }
+            } else {
+                records = getLocalRecords();
+            }
+
+            renderHistoryUI(records);
+        };
+
+        window.saveWorkoutRecord = async function(workoutData) {
+            if (!window.isLocalFallbackMode && window.firebaseDb && window.currentUser && !window.currentUser.isGuest) {
+                try {
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'ironbell-app';
+                    const historyRef = collection(window.firebaseDb, 'artifacts', appId, 'users', window.currentUser.uid, 'workouts');
+                    await addDoc(historyRef, {
+                        ...workoutData,
+                        createdAt: new Date().toISOString()
+                    });
+                } catch(e) {
+                    saveLocalRecord(workoutData);
+                }
+            } else {
+                saveLocalRecord(workoutData);
+            }
+            loadWorkoutHistory();
+        };
+
+        function getLocalRecords() {
+            try {
+                return JSON.parse(localStorage.getItem('ironbell_history') || '[]');
+            } catch(e) { return []; }
+        }
+
+        function saveLocalRecord(data) {
+            const current = getLocalRecords();
+            current.unshift({ id: 'loc_' + Date.now(), createdAt: new Date().toISOString(), ...data });
+            localStorage.setItem('ironbell_history', JSON.stringify(current));
+        }
+
+        function updateUserUI() {
+            const userAvatar = document.getElementById('user-avatar');
+            const userName = document.getElementById('user-name');
+            const loginBtn = document.getElementById('btn-login');
+            const logoutBtn = document.getElementById('btn-logout');
+
+            if (window.currentUser) {
+                if (userName) userName.textContent = window.currentUser.displayName || 'User';
+                if (userAvatar) {
+                    userAvatar.src = window.currentUser.photoURL || `https://placehold.co/40x40/ea580c/ffffff?text=${(window.currentUser.displayName||'U').charAt(0)}`;
+                }
+                if (loginBtn) loginBtn.classList.add('hidden');
+                if (logoutBtn) logoutBtn.classList.remove('hidden');
+            } else {
+                if (userName) userName.textContent = 'Guest';
+                if (loginBtn) loginBtn.classList.remove('hidden');
+                if (logoutBtn) logoutBtn.classList.add('hidden');
+            }
+        }
+
+        function showNotification(msg) {
+            const toast = document.getElementById('toast-notification');
+            if (toast) {
+                toast.textContent = msg;
+                toast.classList.remove('translate-y-20', 'opacity-0');
+                setTimeout(() => {
+                    toast.classList.add('translate-y-20', 'opacity-0');
+                }, 3000);
+            }
+        }
+
+        // Run initialization
+        initFirebaseSafely();
+    </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between selection:bg-brand-orange selection:text-white">
+
+    <!-- TOP NAVIGATION -->
+    <header class="sticky top-0 z-40 bg-slate-900/90 backdrop-blur border-b border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo -->
+                <div class="flex items-center space-x-3 cursor-pointer" onclick="switchTab('calculator')">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-orange-500/20 font-black text-xl">
+                        <i data-lucide="dumbbell" class="w-6 h-6 transform -rotate-45"></i>
+                    </div>
+                    <div>
+                        <span class="text-xl font-extrabold tracking-tight text-white">IRON<span class="text-brand-orange">BELL</span></span>
+                        <span class="text-xs text-amber-500 font-semibold block -mt-1 tracking-wider" data-i18n="appSubtitle">Single Kettlebell Fitness</span>
+                    </div>
+                </div>
+
+                <!-- Desktop Nav Tabs -->
+                <nav class="hidden md:flex space-x-1 lg:space-x-2">
+                    <button onclick="switchTab('calculator')" id="nav-calculator" class="nav-btn px-3.5 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 text-brand-orange bg-slate-800">
+                        <i data-lucide="calculator" class="w-4 h-4"></i> <span data-i18n="navCalculator">ประเมินน้ำหนัก</span>
+                    </button>
+                    <button onclick="switchTab('preset-workouts')" id="nav-preset-workouts" class="nav-btn px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center gap-2">
+                        <i data-lucide="flame" class="w-4 h-4"></i> <span data-i18n="navWorkouts">ตารางฝึกซ้อม</span>
+                    </button>
+                    <button onclick="switchTab('library')" id="nav-library" class="nav-btn px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center gap-2">
+                        <i data-lucide="book-open" class="w-4 h-4"></i> <span data-i18n="navLibrary">คลังท่าทาง</span>
+                    </button>
+                    <button onclick="switchTab('history')" id="nav-history" class="nav-btn px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center gap-2">
+                        <i data-lucide="history" class="w-4 h-4"></i> <span data-i18n="navHistory">บันทึก & สถิติ</span>
+                    </button>
+                </nav>
+
+                <!-- Language Switcher & Authentication UI -->
+                <div class="flex items-center gap-3">
+                    <!-- Language Selector Buttons -->
+                    <div class="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700/60 text-xs font-bold">
+                        <button onclick="changeLanguage('th')" id="lang-btn-th" class="px-2.5 py-1 rounded-lg transition text-slate-400 hover:text-white">🇹🇭 TH</button>
+                        <button onclick="changeLanguage('en')" id="lang-btn-en" class="px-2.5 py-1 rounded-lg transition text-slate-400 hover:text-white">🇺🇸 EN</button>
+                        <button onclick="changeLanguage('zh')" id="lang-btn-zh" class="px-2.5 py-1 rounded-lg transition text-slate-400 hover:text-white">🇨🇳 中文</button>
+                    </div>
+
+                    <!-- Auth State Button (Google Login / Profile) -->
+                    <div id="auth-container" class="flex items-center gap-2">
+                        <button id="btn-google-login" onclick="window.loginWithGoogle()" class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold text-slate-200 transition">
+                            <svg class="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                            </svg>
+                            <span data-i18n="btnLoginGoogle">เข้าสู่ระบบด้วย Google</span>
+                        </button>
+
+                        <div id="user-logged-panel" class="hidden items-center gap-2">
+                            <img id="user-avatar" src="" class="w-8 h-8 rounded-full border border-brand-orange hidden" alt="User Avatar">
+                            <div class="text-left hidden sm:block">
+                                <div id="user-display-name" class="text-xs font-bold text-white truncate max-w-[100px]">User</div>
+                                <span class="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span> Syncing
+                                </span>
+                            </div>
+                            <button onclick="window.logoutUser()" class="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 transition" title="Logout">
+                                <i data-lucide="log-out" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- MOBILE NAVIGATION (BOTTOM BAR) -->
+    <div class="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-2 flex justify-around">
+        <button onclick="switchTab('calculator')" id="mobile-nav-calculator" class="mobile-nav-btn flex flex-col items-center p-1.5 rounded-lg text-brand-orange">
+            <i data-lucide="calculator" class="w-5 h-5"></i>
+            <span class="text-[10px] mt-1 font-medium" data-i18n="navCalculator">ประเมิน</span>
+        </button>
+        <button onclick="switchTab('preset-workouts')" id="mobile-nav-preset-workouts" class="mobile-nav-btn flex flex-col items-center p-1.5 rounded-lg text-slate-400">
+            <i data-lucide="flame" class="w-5 h-5"></i>
+            <span class="text-[10px] mt-1 font-medium" data-i18n="navWorkouts">ตารางฝึก</span>
+        </button>
+        <button onclick="switchTab('library')" id="mobile-nav-library" class="mobile-nav-btn flex flex-col items-center p-1.5 rounded-lg text-slate-400">
+            <i data-lucide="book-open" class="w-5 h-5"></i>
+            <span class="text-[10px] mt-1 font-medium" data-i18n="navLibrary">คลังท่า</span>
+        </button>
+        <button onclick="switchTab('history')" id="mobile-nav-history" class="mobile-nav-btn flex flex-col items-center p-1.5 rounded-lg text-slate-400">
+            <i data-lucide="history" class="w-5 h-5"></i>
+            <span class="text-[10px] mt-1 font-medium" data-i18n="navHistory">สถิติ</span>
+        </button>
+    </div>
+
+    <!-- MAIN CONTENT AREA -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8 flex-grow w-full mb-16 md:mb-0">
+
+        <!-- TAB 1: KETTLEBELL WEIGHT CALCULATOR & USER ASSESSMENT -->
+        <section id="tab-calculator" class="tab-content">
+            <div class="max-w-4xl mx-auto">
+                <div class="mb-8 text-center sm:text-left">
+                    <h1 class="text-2xl sm:text-4xl font-extrabold text-white tracking-tight" data-i18n="calcTitle">คำนวณ & แนะนำน้ำหนัก Kettlebell ที่เหมาะสม</h1>
+                    <p class="mt-2 text-slate-400 text-sm sm:text-base" data-i18n="calcSubtitle">กรอกข้อมูลร่างกายเพื่อหาขนาด Kettlebell ลูกแรกที่ปลอดภัยและคุ้มค่าที่สุดสำหรับคุณ</p>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                    <!-- Form Input Card -->
+                    <div class="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                        <form id="assessment-form" onsubmit="calculateKettlebellRecommendation(event)" class="space-y-5">
+                            
+                            <!-- Gender -->
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-2" data-i18n="lblGender">1. เพศ (Gender)</label>
+                                <div class="grid grid-cols-3 gap-3">
+                                    <label class="cursor-pointer">
+                                        <input type="radio" name="gender" value="male" class="peer hidden" checked>
+                                        <div class="p-3 rounded-xl border border-slate-700 bg-slate-800/50 text-center peer-checked:border-brand-orange peer-checked:bg-brand-orange/10 peer-checked:text-brand-orange transition font-semibold text-sm" data-i18n="genderMale">
+                                            ชาย
+                                        </div>
+                                    </label>
+                                    <label class="cursor-pointer">
+                                        <input type="radio" name="gender" value="female" class="peer hidden">
+                                        <div class="p-3 rounded-xl border border-slate-700 bg-slate-800/50 text-center peer-checked:border-brand-orange peer-checked:bg-brand-orange/10 peer-checked:text-brand-orange transition font-semibold text-sm" data-i18n="genderFemale">
+                                            หญิง
+                                        </div>
+                                    </label>
+                                    <label class="cursor-pointer">
+                                        <input type="radio" name="gender" value="other" class="peer hidden">
+                                        <div class="p-3 rounded-xl border border-slate-700 bg-slate-800/50 text-center peer-checked:border-brand-orange peer-checked:bg-brand-orange/10 peer-checked:text-brand-orange transition font-semibold text-sm" data-i18n="genderOther">
+                                            อื่นๆ
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <!-- Weight & Height -->
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-bold text-slate-300 mb-1" data-i18n="lblWeight">น้ำหนักตัว (kg)</label>
+                                    <input type="number" id="user-weight" value="65" min="30" max="200" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white font-bold focus:outline-none focus:border-brand-orange">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold text-slate-300 mb-1" data-i18n="lblHeight">ส่วนสูง (cm)</label>
+                                    <input type="number" id="user-height" value="170" min="120" max="230" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white font-bold focus:outline-none focus:border-brand-orange">
+                                </div>
+                            </div>
+
+                            <!-- Experience Level -->
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-1" data-i18n="lblExp">2. ระดับประสบการณ์ออกกำลังกาย</label>
+                                <select id="user-experience" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-200 font-medium focus:outline-none focus:border-brand-orange text-sm">
+                                    <option value="beginner" data-i18n="expBeginner">มือใหม่เพิ่งเริ่มออกกำลังกาย (Beginner)</option>
+                                    <option value="intermediate" selected data-i18n="expIntermediate">ออกกำลังกายบ้างเป็นประจำ (Intermediate)</option>
+                                    <option value="advanced" data-i18n="expAdvanced">สายเวทเทรนนิ่ง / ออกกำลังกายหนัก (Advanced)</option>
+                                </select>
+                            </div>
+
+                            <!-- Primary Goal -->
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-1" data-i18n="lblGoal">3. เป้าหมายหลักของคุณ</label>
+                                <select id="user-goal" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-200 font-medium focus:outline-none focus:border-brand-orange text-sm">
+                                    <option value="weightloss" data-i18n="goalWeightLoss">ลดน้ำหนัก & เผาผลาญไขมัน (Fat Loss)</option>
+                                    <option value="toning" data-i18n="goalToning">กระชับสัดส่วน & สร้างกล้ามเนื้อ (Toning)</option>
+                                    <option value="strength" data-i18n="goalStrength">เพิ่มความแข็งแรง & พลังกาย (Strength)</option>
+                                </select>
+                            </div>
+
+                            <button type="submit" class="w-full py-3.5 bg-gradient-to-r from-brand-orange to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-extrabold rounded-xl shadow-lg shadow-orange-500/25 transition flex items-center justify-center gap-2">
+                                <i data-lucide="sparkles" class="w-5 h-5"></i> <span data-i18n="btnCalculate">ประเมินและคำนวณผลลัพธ์</span>
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Result Panel -->
+                    <div id="recommendation-result" class="lg:col-span-6 space-y-5">
+                        <!-- JS Will inject result cards here -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: PRESET WORKOUT ROUTINES -->
+        <section id="tab-preset-workouts" class="tab-content hidden">
+            <div class="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl sm:text-4xl font-extrabold text-white tracking-tight" data-i18n="workoutsTitle">โปรแกรมฝึก Kettlebell ลูกเดียว</h1>
+                    <p class="mt-1 text-slate-400 text-sm" data-i18n="workoutsSubtitle">โปรแกรมที่ออกแบบมาให้ฝึกได้ทันทีที่บ้าน ได้ผลลัพธ์ทั้งความแข็งแรงและเผาผลาญ</p>
+                </div>
+                <!-- Filter Tabs -->
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="filterPresets('all')" class="preset-filter-btn px-3 py-1.5 rounded-lg text-xs font-bold bg-brand-orange text-white" data-i18n="filterAll">ทั้งหมด</button>
+                    <button onclick="filterPresets('Full Body')" class="preset-filter-btn px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="filterFullBody">ทั่วร่างกาย</button>
+                    <button onclick="filterPresets('HIIT/Fat Burn')" class="preset-filter-btn px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="filterHIIT">เน้นเบิร์น</button>
+                    <button onclick="filterPresets('Core & Mobility')" class="preset-filter-btn px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="filterCore">แกนกลาง</button>
+                </div>
+            </div>
+
+            <!-- Preset Cards Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="preset-cards-container">
+                <!-- Javascript will inject preset cards here -->
+            </div>
+        </section>
+
+        <!-- TAB 3: EXERCISE LIBRARY -->
+        <section id="tab-library" class="tab-content hidden">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                <div>
+                    <h1 class="text-2xl sm:text-4xl font-extrabold text-white" data-i18n="libTitle">คลังท่าออกกำลังกาย (Exercise Library)</h1>
+                    <p class="text-slate-400 text-sm mt-1" data-i18n="libSubtitle">คู่มือฝึกท่าทางอย่างถูกวิธี ป้องกันอาการบาดเจ็บ และโฟกัสถูกจุด</p>
+                </div>
+                <!-- Search -->
+                <div class="flex flex-col sm:flex-row gap-3">
+                    <div class="relative w-full sm:w-64">
+                        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"></i>
+                        <input type="text" id="library-search" onkeyup="filterLibrary()" data-i18n-ph="searchPlaceholder" placeholder="ค้นหาชื่อท่าหรือกล้ามเนื้อ..." class="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-xl text-sm focus:outline-none focus:border-brand-orange text-slate-200">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Category Quick Selector -->
+            <div class="flex flex-wrap gap-2 mb-6">
+                <button onclick="filterLibraryCategory('all')" class="lib-cat-btn px-3.5 py-1.5 rounded-xl text-xs font-bold bg-brand-orange text-white" data-i18n="catAll">ทุกส่วน</button>
+                <button onclick="filterLibraryCategory('Legs/Glutes')" class="lib-cat-btn px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="catLegs">ขา & ก้น (Legs/Glutes)</button>
+                <button onclick="filterLibraryCategory('Upper Body')" class="lib-cat-btn px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="catUpper">ช่วงบน (Upper Body)</button>
+                <button onclick="filterLibraryCategory('Core & Full Body')" class="lib-cat-btn px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700" data-i18n="catCore">แกนกลาง & ทั่วตัว (Core/Full Body)</button>
+            </div>
+
+            <!-- Library Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="library-cards-container">
+                <!-- Javascript populates exercise cards -->
+            </div>
+        </section>
+
+        <!-- TAB 4: WORKOUT LOG & HISTORY -->
+        <section id="tab-history" class="tab-content hidden">
+            <div class="mb-8">
+                <h1 class="text-2xl sm:text-4xl font-extrabold text-white" data-i18n="historyTitle">บันทึกการซ้อม & สถิติส่วนตัว</h1>
+                <p class="text-slate-400 text-sm mt-1" data-i18n="historySubtitle">ติดตามวินัย จำนวนครั้ง และปริมาณน้ำหนักสะสมที่คุณยกได้</p>
+            </div>
+
+            <!-- Stats Overview Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex items-center gap-4">
+                    <div class="p-3.5 bg-brand-orange/10 text-brand-orange rounded-xl">
+                        <i data-lucide="trophy" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider" data-i18n="statTotalWorkouts">ฝึกสำเร็จรวม</div>
+                        <div class="text-2xl font-black text-white mt-0.5" id="stat-total-workouts">0 ครั้ง</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex items-center gap-4">
+                    <div class="p-3.5 bg-amber-500/10 text-amber-500 rounded-xl">
+                        <i data-lucide="zap" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider" data-i18n="statStreak">ความต่อเนื่องปัจจุบัน</div>
+                        <div class="text-2xl font-black text-white mt-0.5" id="stat-streak">0 วัน</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex items-center gap-4">
+                    <div class="p-3.5 bg-brand-cyan/10 text-brand-cyan rounded-xl">
+                        <i data-lucide="scale" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider" data-i18n="statVolume">ปริมาณประเมินสะสม</div>
+                        <div class="text-2xl font-black text-white mt-0.5" id="stat-total-volume">0 kg</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex items-center gap-4">
+                    <div class="p-3.5 bg-brand-emerald/10 text-brand-emerald rounded-xl">
+                        <i data-lucide="clock" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <div class="text-slate-400 text-xs font-bold uppercase tracking-wider" data-i18n="statTime">เวลารวมที่ใช้ฝึก</div>
+                        <div class="text-2xl font-black text-white mt-0.5" id="stat-total-time">0 นาที</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History Table & Graph -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Log List -->
+                <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-bold text-white" data-i18n="tblRecentHeader">ประวัติการฝึกซ้อมล่าสุด</h3>
+                        <button onclick="clearHistory()" class="text-xs text-rose-400 hover:text-rose-300 font-semibold" data-i18n="btnClearHistory">ลบประวัติทั้งหมด</button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-800/60 text-slate-400 uppercase text-xs">
+                                <tr>
+                                    <th class="p-3 rounded-l-lg" data-i18n="thDate">วันที่</th>
+                                    <th class="p-3" data-i18n="thWorkout">ชื่อตาราง</th>
+                                    <th class="p-3" data-i18n="thTime">เวลา</th>
+                                    <th class="p-3" data-i18n="thReps">จำนวนครั้งรวม</th>
+                                    <th class="p-3 rounded-r-lg" data-i18n="thWeight">น้ำหนักที่ใช้</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body" class="divide-y divide-slate-800">
+                                <!-- JS inserts row logs -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Chart Card -->
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between">
+                    <div>
+                        <h3 class="text-lg font-bold text-white mb-1" data-i18n="chartTitle">ความต่อเนื่องรายสัปดาห์</h3>
+                        <p class="text-xs text-slate-400 mb-4" data-i18n="chartSubtitle">จำนวนนาทีในการฝึก 7 ครั้งล่าสุด</p>
+                    </div>
+                    <div class="h-56 relative flex items-center justify-center">
+                        <canvas id="historyChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- INTERACTIVE WORKOUT MODAL -->
+        <div id="active-workout-modal" class="fixed inset-0 bg-slate-950/95 backdrop-blur-md z-50 hidden flex flex-col justify-between p-4 sm:p-6 overflow-y-auto">
+            <!-- Top Bar -->
+            <div class="flex justify-between items-center max-w-3xl mx-auto w-full">
+                <div class="flex items-center gap-2">
+                    <span id="modal-workout-title" class="font-extrabold text-base sm:text-lg text-white">Full Body Express</span>
+                    <span id="modal-set-badge" class="px-2.5 py-0.5 rounded-full bg-slate-800 text-brand-orange font-mono text-xs border border-brand-orange/30">Set 1/4</span>
+                </div>
+                <button onclick="confirmExitWorkout()" class="text-slate-400 hover:text-white p-2 rounded-lg bg-slate-900 border border-slate-800">
+                    <i data-lucide="x" class="w-6 h-6"></i>
+                </button>
+            </div>
+
+            <!-- Central Active Exercise View -->
+            <div class="max-w-2xl mx-auto w-full my-auto py-4 flex flex-col items-center text-center">
+                
+                <!-- Status Banner (WORK vs REST) -->
+                <div id="workout-phase-banner" class="px-6 py-1.5 rounded-full font-black text-xs sm:text-sm uppercase tracking-widest bg-brand-orange/20 text-brand-orange border border-brand-orange/30 mb-4 animate-pulse">
+                    WORK
+                </div>
+
+                <!-- Animated Diagram / Timer Circle -->
+                <div class="relative mb-4">
+                    <svg class="w-56 h-56 sm:w-64 sm:h-64">
+                        <circle class="text-slate-800" stroke-width="10" stroke="currentColor" fill="transparent" r="100" cx="112" cy="112"/>
+                        <circle id="timer-progress-ring" class="text-brand-orange progress-ring-circle" stroke-width="10" stroke-dasharray="628" stroke-dashoffset="0" stroke-linecap="round" stroke="currentColor" fill="transparent" r="100" cx="112" cy="112"/>
+                    </svg>
+
+                    <!-- Inner Exercise Visual & Countdown -->
+                    <div class="absolute inset-0 flex flex-col items-center justify-center p-4">
+                        <div id="active-exercise-icon" class="mb-1 text-brand-cyan scale-90 sm:scale-100">
+                            <!-- SVG Dynamic Diagram Rendered Here -->
+                        </div>
+                        <div id="timer-seconds" class="text-4xl sm:text-5xl font-black tracking-tight text-white font-mono">45</div>
+                        <div id="timer-label" class="text-[10px] sm:text-xs text-slate-400 uppercase tracking-widest mt-0.5" data-i18n="lblSecRemaining">วินาทีที่เหลือ</div>
+                    </div>
+                </div>
+
+                <!-- Exercise Info -->
+                <h2 id="active-exercise-name" class="text-xl sm:text-3xl font-extrabold text-white mb-1">Two-Arm Kettlebell Swing</h2>
+                <p id="active-exercise-target" class="text-xs text-brand-cyan font-semibold uppercase tracking-wider mb-4">Target: Glutes, Hamstrings</p>
+
+                <!-- Rep Counter or Target Cue -->
+                <div class="flex items-center justify-center gap-6 bg-slate-900 border border-slate-800 rounded-2xl px-6 py-2.5 mb-4 w-full max-w-md">
+                    <div class="text-center">
+                        <div class="text-xs text-slate-400" data-i18n="lblTargetReps">จำนวนครั้งที่แนะนำ</div>
+                        <div id="active-target-reps" class="font-bold text-white text-sm sm:text-base">15 - 20 reps</div>
+                    </div>
+                    <div class="h-8 w-px bg-slate-800"></div>
+                    <div class="text-center">
+                        <div class="text-xs text-slate-400" data-i18n="lblCompletedReps">จำนวนครั้งที่ทำได้จริง</div>
+                        <div class="flex items-center gap-2 mt-0.5">
+                            <button onclick="adjustRepCount(-1)" class="w-6 h-6 rounded bg-slate-800 text-slate-300 font-bold hover:bg-slate-700 flex items-center justify-center">-</button>
+                            <span id="active-rep-count" class="font-mono font-bold text-brand-orange text-lg">0</span>
+                            <button onclick="adjustRepCount(1)" class="w-6 h-6 rounded bg-slate-800 text-slate-300 font-bold hover:bg-slate-700 flex items-center justify-center">+</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Form Cue Box -->
+                <div class="bg-slate-900/90 border border-amber-500/30 rounded-xl p-3.5 text-left max-w-md w-full">
+                    <div class="flex items-center gap-1.5 text-amber-400 font-bold text-xs uppercase tracking-wider mb-1">
+                        <i data-lucide="lightbulb" class="w-4 h-4"></i> <span data-i18n="lblFormCue">ข้อแนะนำฟอร์มการเล่น</span>
+                    </div>
+                    <p id="active-form-cue" class="text-xs text-slate-300 leading-relaxed">...</p>
+                </div>
+            </div>
+
+            <!-- Bottom Controller Bar -->
+            <div class="max-w-xl mx-auto w-full border-t border-slate-800 pt-3 flex items-center justify-between gap-4">
+                <button onclick="skipExercise(-1)" class="p-3 bg-slate-900 border border-slate-800 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800 transition">
+                    <i data-lucide="skip-back" class="w-5 h-5"></i>
+                </button>
+
+                <button id="btn-pause-play" onclick="togglePauseWorkout()" class="flex-1 py-3.5 bg-brand-orange text-white font-extrabold rounded-xl shadow-lg shadow-orange-500/20 hover:bg-orange-600 transition flex items-center justify-center gap-2 text-base">
+                    <i data-lucide="pause" class="w-5 h-5 fill-current"></i> <span id="pause-btn-text" data-i18n="btnPause">หยุดชั่วคราว</span>
+                </button>
+
+                <button onclick="skipExercise(1)" class="p-3 bg-slate-900 border border-slate-800 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800 transition">
+                    <i data-lucide="skip-forward" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="border-t border-slate-900 bg-slate-950 py-6 text-center text-xs text-slate-500">
+        <div class="max-w-7xl mx-auto px-4" data-i18n="footerText">
+            IronBell &copy; แอปซ้อม Kettlebell ลูกเดียวเพื่อสุขภาพและความแข็งแรง
+        </div>
+    </footer>
+
+    <!-- AUDIO SYNTHESIS -->
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playBeep(freq = 600, type = 'sine', duration = 0.15) {
+            try {
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + duration);
+            } catch(e) {
+                console.log("Audio not supported");
+            }
+        }
+    </script>
+
+    <!-- TRANSLATIONS DICTIONARY & APP LOGIC -->
+    <script>
+        let currentLang = localStorage.getItem('ironbell_lang') || 'th';
+
+        const I18N = {
+            th: {
+                appSubtitle: 'แอปเทรนนิ่ง Kettlebell ลูกเดียว',
+                navCalculator: 'ประเมินน้ำหนัก',
+                navWorkouts: 'ตารางฝึกซ้อม',
+                navLibrary: 'คลังท่าทาง',
+                navHistory: 'บันทึก & สถิติ',
+                calcTitle: 'คำนวณ & แนะนำน้ำหนัก Kettlebell ที่เหมาะสม',
+                calcSubtitle: 'กรอกข้อมูลร่างกายเพื่อหาขนาด Kettlebell ลูกแรกที่ปลอดภัยและคุ้มค่าที่สุดสำหรับคุณ',
+                lblGender: '1. เพศ (Gender)',
+                genderMale: 'ชาย',
+                genderFemale: 'หญิง',
+                genderOther: 'อื่นๆ',
+                lblWeight: 'น้ำหนักตัว (kg)',
+                lblHeight: 'ส่วนสูง (cm)',
+                lblExp: '2. ระดับประสบการณ์ออกกำลังกาย',
+                expBeginner: 'มือใหม่เพิ่งเริ่มออกกำลังกาย (Beginner)',
+                expIntermediate: 'ออกกำลังกายบ้างเป็นประจำ (Intermediate)',
+                expAdvanced: 'สายเวทเทรนนิ่ง / ออกกำลังกายหนัก (Advanced)',
+                lblGoal: '3. เป้าหมายหลักของคุณ',
+                goalWeightLoss: 'ลดน้ำหนัก & เผาผลาญไขมัน (Fat Loss)',
+                goalToning: 'กระชับสัดส่วน & สร้างกล้ามเนื้อ (Toning)',
+                goalStrength: 'เพิ่มความแข็งแรง & พลังกาย (Strength)',
+                btnCalculate: 'ประเมินและคำนวณผลลัพธ์',
+                resultAnalysisTitle: 'ผลวิเคราะห์ของคุณ',
+                recommendedWeightHeader: 'น้ำหนัก Kettlebell ที่แนะนำสำหรับคุณ:',
+                lblLowerBody: 'ท่าใช้ขา & ก้น (Swings/Squats)',
+                lblUpperBody: 'ท่าช่วงบน (Press/Rows)',
+                tipHeader: '💡 คำแนะนำในการเลือกซื้อลูกแรก:',
+                tipBody: 'หากต้องการซื้อเพียง 1 ลูกเท่านั้น แนะนำให้เลือกขนาด {lower} kg หากเน้นสร้างแรงกล้ามเนื้อขาและความแรงเหวี่ยง หรือเลือกขนาด {upper} kg หากต้องการเน้นความปลอดภัยและฝึกลำตัวช่วงบน',
+                warmupTitle: 'ข้อควรระวังและวิธีวอร์มอัพ',
+                warmup1: 'หมุนข้อต่อไหล่ สะโพก และข้อเท้าก่อนเริ่มฝึกทุกครั้ง 3-5 นาที',
+                warmup2: 'ขณะฝึกท่า Swing ให้เน้น "พับสะโพก" (Hip Hinge) ห้ามย่อเข่าลงสควอท',
+                warmup3: 'หากรู้สึกปวดหลังล่าง ให้หยุดพักและเช็คว่าหลังงอขณะยกแก้วหรือไม่',
+                workoutsTitle: 'โปรแกรมฝึก Kettlebell ลูกเดียว',
+                workoutsSubtitle: 'โปรแกรมที่ออกแบบมาให้ฝึกได้ทันทีที่บ้าน ได้ผลลัพธ์ทั้งความแข็งแรงและเผาผลาญ',
+                filterAll: 'ทั้งหมด',
+                filterFullBody: 'ทั่วร่างกาย',
+                filterHIIT: 'เน้นเบิร์น',
+                filterCore: 'แกนกลาง',
+                libTitle: 'คลังท่าออกกำลังกาย (Exercise Library)',
+                libSubtitle: 'คู่มือฝึกท่าทางอย่างถูกวิธี ป้องกันอาการบาดเจ็บ และโฟกัสถูกจุด',
+                searchPlaceholder: 'ค้นหาชื่อท่าหรือกล้ามเนื้อ...',
+                catAll: 'ทุกส่วน',
+                catLegs: 'ขา & ก้น (Legs/Glutes)',
+                catUpper: 'ช่วงบน (Upper Body)',
+                catCore: 'แกนกลาง & ทั่วตัว (Core/Full Body)',
+                historyTitle: 'บันทึกการซ้อม & สถิติส่วนตัว',
+                historySubtitle: 'ติดตามวินัย จำนวนครั้ง และปริมาณน้ำหนักสะสมที่คุณยกได้',
+                statTotalWorkouts: 'ฝึกสำเร็จรวม',
+                statStreak: 'ความต่อเนื่องปัจจุบัน',
+                statVolume: 'ปริมาณประเมินสะสม',
+                statTime: 'เวลารวมที่ใช้ฝึก',
+                tblRecentHeader: 'ประวัติการฝึกซ้อมล่าสุด',
+                btnClearHistory: 'ลบประวัติทั้งหมด',
+                thDate: 'วันที่',
+                thWorkout: 'ชื่อตาราง',
+                thTime: 'เวลา',
+                thReps: 'จำนวนครั้งรวม',
+                thWeight: 'น้ำหนักที่ใช้',
+                chartTitle: 'ความต่อเนื่องรายสัปดาห์',
+                chartSubtitle: 'จำนวนนาทีในการฝึก 7 ครั้งล่าสุด',
+                lblSecRemaining: 'วินาทีที่เหลือ',
+                lblTargetReps: 'จำนวนครั้งที่แนะนำ',
+                lblCompletedReps: 'จำนวนครั้งที่ทำได้จริง',
+                lblFormCue: 'ข้อแนะนำฟอร์มการเล่น',
+                btnPause: 'หยุดชั่วคราว',
+                btnResume: 'เล่นต่อ',
+                phaseWork: 'ช่วงเวลาฝึก (WORK)',
+                phaseRest: 'ช่วงเวลาพัก (REST)',
+                phaseRestTitle: 'พักหายใจเตรียมท่าถัดไป',
+                btnStartRoutine: 'เริ่มโปรแกรมนี้',
+                lblSteps: 'ขั้นตอนการเล่นอย่างถูกต้อง:',
+                lblMistakes: 'ข้อผิดพลาดที่ต้องระวัง:',
+                lblMuscles: 'กล้ามเนื้อ:',
+                unitMins: 'นาที',
+                unitReps: 'ครั้ง',
+                unitDays: 'วัน',
+                btnLoginGoogle: 'เข้าสู่ระบบด้วย Google',
+                footerText: 'IronBell © แอปซ้อม Kettlebell ลูกเดียวเพื่อสุขภาพและความแข็งแรง'
+            },
+            en: {
+                appSubtitle: 'Single Kettlebell Companion App',
+                navCalculator: 'Weight Calc',
+                navWorkouts: 'Routines',
+                navLibrary: 'Library',
+                navHistory: 'Stats & Logs',
+                calcTitle: 'Kettlebell Weight Assessment',
+                calcSubtitle: 'Enter your profile to calculate the optimal and safest starting kettlebell weight.',
+                lblGender: '1. Gender',
+                genderMale: 'Male',
+                genderFemale: 'Female',
+                genderOther: 'Other',
+                lblWeight: 'Body Weight (kg)',
+                lblHeight: 'Height (cm)',
+                lblExp: '2. Fitness Experience Level',
+                expBeginner: 'Beginner (Just starting out)',
+                expIntermediate: 'Intermediate (Regular workouts)',
+                expAdvanced: 'Advanced (Experienced strength lifter)',
+                lblGoal: '3. Primary Fitness Goal',
+                goalWeightLoss: 'Fat Loss & Conditioning',
+                goalToning: 'Body Toning & Muscle Gain',
+                goalStrength: 'Pure Strength & Power',
+                btnCalculate: 'Calculate Recommendation',
+                resultAnalysisTitle: 'Your Assessment Result',
+                recommendedWeightHeader: 'Recommended Kettlebell Weights:',
+                lblLowerBody: 'Lower Body (Swings/Squats)',
+                lblUpperBody: 'Upper Body (Press/Rows)',
+                tipHeader: '💡 Single Kettlebell Buying Tip:',
+                tipBody: 'If purchasing only 1 kettlebell, select {lower} kg for lower body explosiveness and swings, or {upper} kg for upper body pressing and safety.',
+                warmupTitle: 'Safety & Warm-up Essentials',
+                warmup1: 'Mobilize shoulders, hips, and ankles for 3-5 mins prior to lifting.',
+                warmup2: 'Master the Hip Hinge on swings; avoid squatting down.',
+                warmup3: 'Stop immediately if you feel lower back strain and verify posture.',
+                workoutsTitle: 'Single Kettlebell Workouts',
+                workoutsSubtitle: 'Goal-driven home routines engineered for maximum fat burn and functional power.',
+                filterAll: 'All',
+                filterFullBody: 'Full Body',
+                filterHIIT: 'HIIT / Burn',
+                filterCore: 'Core & Mobility',
+                libTitle: 'Exercise Library',
+                libSubtitle: 'Detailed form guides, biomechanics cues, and safety tips for single kettlebell training.',
+                searchPlaceholder: 'Search exercises or muscles...',
+                catAll: 'All Parts',
+                catLegs: 'Legs & Glutes',
+                catUpper: 'Upper Body',
+                catCore: 'Core & Full Body',
+                historyTitle: 'Workout Logs & Analytics',
+                historySubtitle: 'Track your consistency, total rep volume, and personal records.',
+                statTotalWorkouts: 'Completed Sessions',
+                statStreak: 'Current Streak',
+                statVolume: 'Estimated Volume',
+                statTime: 'Total Time Spent',
+                tblRecentHeader: 'Recent Workout History',
+                btnClearHistory: 'Clear History',
+                thDate: 'Date',
+                thWorkout: 'Routine',
+                thTime: 'Duration',
+                thReps: 'Total Reps',
+                thWeight: 'Weight Used',
+                chartTitle: 'Weekly Consistency',
+                chartSubtitle: 'Training minutes in last 7 sessions',
+                lblSecRemaining: 'Seconds Remaining',
+                lblTargetReps: 'Target Reps',
+                lblCompletedReps: 'Logged Reps',
+                lblFormCue: 'Key Form Cue',
+                btnPause: 'Pause',
+                btnResume: 'Resume',
+                phaseWork: 'WORK PHASE',
+                phaseRest: 'REST PHASE',
+                phaseRestTitle: 'Rest & Prepare for Next Exercise',
+                btnStartRoutine: 'Start Routine',
+                lblSteps: 'Execution Steps:',
+                lblMistakes: 'Common Mistakes:',
+                lblMuscles: 'Muscles:',
+                unitMins: 'mins',
+                unitReps: 'reps',
+                unitDays: 'days',
+                btnLoginGoogle: 'Sign in with Google',
+                footerText: 'IronBell © Single Kettlebell Training Application'
+            },
+            zh: {
+                appSubtitle: '单壶铃健身助手',
+                navCalculator: '重量评估',
+                navWorkouts: '训练计划',
+                navLibrary: '动作图解',
+                navHistory: '数据统计',
+                calcTitle: '壶铃重量推荐与评估',
+                calcSubtitle: '输入您的身体数据，获取首个壶铃的最安全与最佳重量建议。',
+                lblGender: '1. 性别 (Gender)',
+                genderMale: '男士',
+                genderFemale: '女士',
+                genderOther: '其他',
+                lblWeight: '体重 (kg)',
+                lblHeight: '身高 (cm)',
+                lblExp: '2. 运动经验水平',
+                expBeginner: '初学者 (刚刚开始锻炼)',
+                expIntermediate: '中级 (有定期锻炼习惯)',
+                expAdvanced: '高级 (资深力量/健身爱好者)',
+                lblGoal: '3. 核心健身目标',
+                goalWeightLoss: '减脂与体能提升 (Fat Loss)',
+                goalToning: '塑形与肌肉强化 (Toning)',
+                goalStrength: '力量与爆力提升 (Strength)',
+                btnCalculate: '提交评估并计算',
+                resultAnalysisTitle: '您的身体评估结果',
+                recommendedWeightHeader: '为您推荐的壶铃重量：',
+                lblLowerBody: '下肢主导 (摇摆/深蹲)',
+                lblUpperBody: '上肢主导 (推举/划船)',
+                tipHeader: '💡 选购单个壶铃建议：',
+                tipBody: '如果仅购买1个壶铃，若主攻腿臀爆发力推荐选择 {lower} kg；若关注上肢推举与高安全性推荐 {upper} kg。',
+                warmupTitle: '安全提示与热身指南',
+                warmup1: '训练前请充分活动肩关节、髋关节与踝关节3-5分钟。',
+                warmup2: '壶铃摇摆 (Swing) 须以"髋关节折叠" (Hip Hinge) 为核心，切勿做成深蹲。',
+                warmup3: '若下背部感到酸痛，请立即停止并检查腰背是否弯曲。',
+                workoutsTitle: '单壶铃训练计划',
+                workoutsSubtitle: '专为居家设计的高效训练计划，快速燃烧脂肪与提升体能。',
+                filterAll: '全部',
+                filterFullBody: '全身',
+                filterHIIT: '高效燃脂',
+                filterCore: '核心',
+                libTitle: '壶铃动作图解库',
+                libSubtitle: '标准动作示范、要点讲解与常见错误解析。',
+                searchPlaceholder: '搜索动作名称或肌肉...',
+                catAll: '全部部位',
+                catLegs: '腿部与臀部',
+                catUpper: '上肢肌肉',
+                catCore: '核心与全身',
+                historyTitle: '训练日志与数据分析',
+                historySubtitle: '记录您的训练坚持度、累计举重总量与训练时长。',
+                statTotalWorkouts: '已完成训练',
+                statStreak: '当前连续',
+                statVolume: '累计估算容量',
+                statTime: '累计训练时长',
+                tblRecentHeader: '最近训练记录',
+                btnClearHistory: '清空历史记录',
+                thDate: '日期',
+                thWorkout: '计划名称',
+                thTime: '时长',
+                thReps: '总次数',
+                thWeight: '使用重量',
+                chartTitle: '每周训练趋势',
+                chartSubtitle: '最近7次训练时长 (分钟)',
+                lblSecRemaining: '剩余秒数',
+                lblTargetReps: '建议次数',
+                lblCompletedReps: '实际完成次数',
+                lblFormCue: '动作要点提示',
+                btnPause: '暂停',
+                btnResume: '继续',
+                phaseWork: '训练时间 (WORK)',
+                phaseRest: '休息时间 (REST)',
+                phaseRestTitle: '休息调整，准备下一动作',
+                btnStartRoutine: '开始此计划',
+                lblSteps: '动作步骤：',
+                lblMistakes: '常见错误：',
+                lblMuscles: '主导肌肉：',
+                unitMins: '分钟',
+                unitReps: '次',
+                unitDays: '天',
+                btnLoginGoogle: '谷歌账号登录',
+                footerText: 'IronBell © 单壶铃科学健身应用程序'
+            }
+        };
+
+        // MULTILINGUAL DATABASE CONTENT
+        const EXERCISE_DATABASE = [
+            {
+                id: 'kb-swing',
+                category: 'Legs/Glutes',
+                level: { th: 'ปานกลาง', en: 'Intermediate', zh: '中级' },
+                svgIcon: `<svg class="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="50" cy="20" r="8" class="stroke-brand-orange"/><path d="M50 28v25M50 53l-12 35M50 53l12 35M35 38l15 10l15-10" class="stroke-slate-200"/><circle cx="50" cy="55" r="7" fill="#FF5722"/></svg>`,
+                targetReps: '15-20',
+                name: { th: 'Russian Kettlebell Swing', en: 'Russian Kettlebell Swing', zh: '俄式壶铃摇摆' },
+                muscles: { th: ['ก้น (Glutes)', 'ต้นขาด้านหลัง', 'หลังล่าง', 'แกนกลาง'], en: ['Glutes', 'Hamstrings', 'Lower Back', 'Core'], zh: ['臀大肌', '腘绳肌', '下背部', '核心'] },
+                steps: {
+                    th: ["ยืนเกร็งเท้ากว้างเท่าหัวไหล่ วาง Kettlebell ไว้ข้างหน้า 1 ฟุต", "พับสะโพกไปด้านหลัง (Hip Hinge) หลังตรง จับหูแก้วสองมือ", "เหวี่ยง Kettlebell ย้อนไปใต้ขาหนีบอย่างนุ่มนวล", "เกร็งก้นและดันสะโพกไปข้างหน้าอย่างรวดเร็ว ส่งแรงให้แก้วลอยขึ้น"],
+                    en: ["Stand feet shoulder-width apart, kettlebell 1 foot in front.", "Hinge hips back with a flat spine, grip handle with both hands.", "Hike the kettlebell back through legs smoothly.", "Explode hips forward and squeeze glutes to swing to chest level."],
+                    zh: ["双脚与肩同宽站立，壶铃放在身前约30厘米处。", "屈髋后推 (Hip Hinge) 保持背部挺直，双手握紧手柄。", "向后将壶铃顺畅摆入胯下。", "臀部快速向前爆发发力，伸髋将壶铃摆至胸部高度。"]
+                },
+                mistakes: {
+                    th: ["ใช้การย่อเข่าสควอทแทนการพับสะโพก", "ใช้แรงแขนดึงแก้วขึ้นมา", "หลังแอ่นหรือหลังงอ"],
+                    en: ["Squatting instead of hinging hips", "Pulling kettlebell up with arms", "Rounding or arching lower back"],
+                    zh: ["将屈髋做成了深蹲", "用手臂力量拉起壶铃", "弯腰或下背过度过度反弓"]
+                }
+            },
+            {
+                id: 'goblet-squat',
+                category: 'Legs/Glutes',
+                level: { th: 'ง่าย', en: 'Beginner', zh: '初级' },
+                svgIcon: `<svg class="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="50" cy="25" r="8" class="stroke-brand-orange"/><path d="M50 33v20M50 53l-15 25M50 53l15 25M38 42l12-8l12 8" class="stroke-slate-200"/><rect x="44" y="36" width="12" height="12" rx="3" fill="#06B6D4"/></svg>`,
+                targetReps: '10-12',
+                name: { th: 'Kettlebell Goblet Squat', en: 'Kettlebell Goblet Squat', zh: '高杯壶铃深蹲' },
+                muscles: { th: ['ต้นขาด้านหน้า (Quads)', 'ก้น', 'แกนกลาง'], en: ['Quadriceps', 'Glutes', 'Core'], zh: ['股四头肌', '臀肌', '核心肌群'] },
+                steps: {
+                    th: ["อุ้ม Kettlebell ไว้ที่ระดับอก จับหูแก้วทั้งสองข้างให้มั่น", "ยืนเท้ากว้างกว่าหัวไหล่เล็กน้อย เปิดปลายเท้าออกเล็กน้อย", "หย่อนสะโพกลงนั่งสควอท ท่อนหลังตรง ศอกเฉียดด้านในเข่า", "กดส้นเท้าดันตัวกลับขึ้นสู่ท่านั่งยืดตรง"],
+                    en: ["Hold kettlebell close to chest by the horns.", "Stand shoulder-width apart, toes turned slightly out.", "Sit hips down into squat, spine tall, elbows inside knees.", "Drive through heels to stand straight up."],
+                    zh: ["双手握住壶铃手柄两端，贴近胸口。", "双脚略宽于肩，脚尖自然向外微展。", "臀部下蹲，保持躯干挺直，肘部接近膝盖内侧。", "脚跟踩实地面发力站起。"]
+                },
+                mistakes: {
+                    th: ["ลำตัวก้มไปข้างหน้ามากเกินไป", "เข่าหุบเข้าข้างในขณะย่อ", "ส้นเท้ายกพ้นพื้น"],
+                    en: ["Leaning too far forward", "Knees caving inwards", "Heels lifting off ground"],
+                    zh: ["躯干过度前倾", "下蹲时膝盖内扣", "脚后跟跟抬离地面"]
+                }
+            },
+            {
+                id: 'one-arm-row',
+                category: 'Upper Body',
+                level: { th: 'ง่าย', en: 'Beginner', zh: '初级' },
+                svgIcon: `<svg class="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="35" cy="30" r="8" class="stroke-brand-orange"/><path d="M35 38l25 15M60 53l10 35M60 53l-15 35M45 44l5 20" class="stroke-slate-200"/><circle cx="50" cy="68" r="6" fill="#FF5722"/></svg>`,
+                targetReps: '10-12 / side',
+                name: { th: 'Single-Arm KB Row', en: 'Single-Arm KB Row', zh: '单臂壶铃划船' },
+                muscles: { th: ['ปีกหลัง (Lats)', 'สะบัก', 'หน้าแขน'], en: ['Latissimus Dorsi', 'Rhomboids', 'Biceps'], zh: ['背阔肌', '菱形肌', '肱二头肌'] },
+                steps: {
+                    th: ["ก้าวขาไปข้างหลัง พับสะโพกก้มลำตัวทำมุม 45 องศา หลังตรง", "มือหนึ่งท้าวเข่าพยุงตัว มืออีกข้างถือ Kettlebell ปล่อยดิ่ง", "ดึงศอกขึ้นด้านบนและเข้าหาเอว เกร็งสะบักหลัง", "ค่อยๆ ผ่อน Kettlebell ลงสู่ท่าเริ่มต้นอย่างควบคุม"],
+                    en: ["Step one foot back, hinge forward 45 degrees with flat back.", "Support non-working arm on knee, hold kettlebell hanging straight.", "Pull elbow up toward hip, squeezing shoulder blade.", "Lower under control back to starting position."],
+                    zh: ["单腿后撤一步，屈髋俯身45度，背部挺直。", "一手扶膝支撑，另一手握壶铃自然下垂。", "驱动肘部向后向上拉至腰部，收紧背部。", "控制速度缓慢还原至起始位置。"]
+                },
+                mistakes: {
+                    th: ["บิดลำตัวหรือยักไหล่ดึงแรงกระชาก", "หลังงอขณะก้มตัว"],
+                    en: ["Twisting torso or jerking momentum", "Rounding lower back"],
+                    zh: ["借力耸肩หรือ过度旋转躯干", "俯身时弯腰拱背"]
+                }
+            },
+            {
+                id: 'overhead-press',
+                category: 'Upper Body',
+                level: { th: 'ปานกลาง', en: 'Intermediate', zh: '中级' },
+                svgIcon: `<svg class="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="50" cy="18" r="8" class="stroke-brand-orange"/><path d="M50 26v30M50 56l-10 32M50 56l10 32M50 35l18-15" class="stroke-slate-200"/><circle cx="68" cy="12" r="6" fill="#FF5722"/></svg>`,
+                targetReps: '8-10 / side',
+                name: { th: 'Single-Arm Overhead Press', en: 'Single-Arm Overhead Press', zh: '单臂壶铃过顶推举' },
+                muscles: { th: ['ไหล่ (Deltoids)', 'หลังแขน', 'แกนกลาง'], en: ['Deltoids', 'Triceps', 'Core'], zh: ['三角肌', '肱三头肌', '核心'] },
+                steps: {
+                    th: ["พัก Kettlebell ใน Rack Position (แก้วแนบหน้าอก ศอกชิดลำตัว)", "เกร็งหน้าท้อง เกร็งก้น ยืนฐานมั่นคง", "ดัน Kettlebell ขึ้นตรงๆ เหนือหัวจนแขนตึงเหยียดสุด", "ลดระดับกลับลงมาสู่ Rack Position ช้าๆ"],
+                    en: ["Rack kettlebell at chest with wrist straight and elbow tucked.", "Brace core and glutes, maintain solid standing base.", "Press kettlebell straight overhead until lock-out.", "Lower slowly under control back to rack position."],
+                    zh: ["将壶铃架在胸前 (Rack位)，手腕直立，肘部收紧。", "收紧核心与臀部，站姿稳固。", "垂直向上推举壶铃至手臂锁定伸直。", "控制速度缓慢降回胸前Rack位。"]
+                },
+                mistakes: {
+                    th: ["แอ่นหลังล่างเพื่อช่วยดันน้ำหนัก", "ศอกกางออกข้างมากเกินไป"],
+                    en: ["Arching lower back to compensate", "Flaring elbow out too wide"],
+                    zh: ["过度反弓下背借力", "推举时肘部过度向外张开"]
+                }
+            },
+            {
+                id: 'windmill',
+                category: 'Core & Full Body',
+                level: { th: 'ยาก', en: 'Advanced', zh: '高级' },
+                svgIcon: `<svg class="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="60" cy="20" r="8" class="stroke-brand-orange"/><path d="M60 28l-20 30M40 58l-15 30M40 58l20 28M60 28l15-18" class="stroke-slate-200"/><circle cx="78" cy="8" r="6" fill="#F59E0B"/></svg>`,
+                targetReps: '6-8 / side',
+                name: { th: 'Kettlebell Windmill', en: 'Kettlebell Windmill', zh: '壶铃大风车' },
+                muscles: { th: ['เอวและข้างลำตัว (Obliques)', 'ข้อต่อไหล่', 'ต้นขาด้านหลัง'], en: ['Obliques', 'Shoulder Stability', 'Hamstrings'], zh: ['腹斜肌', '肩关节稳定性', '腘绳肌'] },
+                steps: {
+                    th: ["ชู Kettlebell เหนือหัว บิดปลายเท้าไปทางตรงข้าม 45 องศา", "ดันสะโพกไปทางด้านข้างใต้มือที่ชูแก้ว", "ก้มลำตัวสไลด์มือลงตามแนวขา มองขึ้นที่ Kettlebell ตลอด", "เกร็งลำตัวดันตัวกลับขึ้นสู่ท่าตั้งตรง"],
+                    en: ["Press kettlebell overhead, turn feet 45° away from working arm.", "Shift hips back toward working side.", "Lower torso, sliding free hand down lead leg while eyeing weight.", "Engage core and return to standing vertical position."],
+                    zh: ["单臂将壶铃推至头顶锁定，双脚向相反方向旋转45度。", "将髋部向持铃侧后方推送。", "俯身将另一手沿前腿向下滑动，眼睛始终注视上方壶铃。", "收紧核心返回站立位。"]
+                },
+                mistakes: {
+                    th: ["แขนที่ชูแก้วงอหรือไม่ตั้งดิ่ง", "ละสายตาออกจากลูก Kettlebell"],
+                    en: ["Bending overhead arm", "Taking eyes off kettlebell"],
+                    zh: ["头顶手臂弯曲未能保持垂直", "眼睛移开上方壶铃"]
+                }
+            }
+        ];
+
+        const PRESET_WORKOUTS = [
+            {
+                id: 'p1',
+                category: 'Full Body',
+                duration: 15,
+                workSec: 40,
+                restSec: 20,
+                sets: 3,
+                exercises: ['kb-swing', 'goblet-squat', 'one-arm-row', 'overhead-press'],
+                title: { th: 'Full Body Express Blast', en: 'Full Body Express Blast', zh: '全身高效爆发计划' },
+                level: { th: 'ปานกลาง', en: 'Intermediate', zh: '中级' },
+                desc: {
+                    th: 'โปรแกรมองค์รวม 15 นาที ได้ทั้งกล้ามเนื้อและความแข็งแรงทั่วร่างกาย',
+                    en: 'Comprehensive 15-min workout targeting all major muscle groups.',
+                    zh: '15分钟全面训练，兼顾全身肌肉强化与心肺功能。'
+                }
+            },
+            {
+                id: 'p2',
+                category: 'HIIT/Fat Burn',
+                duration: 12,
+                workSec: 45,
+                restSec: 15,
+                sets: 3,
+                exercises: ['kb-swing', 'goblet-squat', 'overhead-press', 'windmill'],
+                title: { th: 'Fat Loss HIIT Torch', en: 'Fat Loss HIIT Torch', zh: 'HIIT极速高能燃脂' },
+                level: { th: 'ยาก', en: 'Advanced', zh: '高级' },
+                desc: {
+                    th: 'เน้นอัตราการเต้นของหัวใจและการเผาผลาญไขมันต่อเนื่อง',
+                    en: 'High-intensity interval routine designed to maximize calorie burn.',
+                    zh: '高强度间歇训练，持续提升心率与脂肪燃烧效率。'
+                }
+            },
+            {
+                id: 'p3',
+                category: 'Core & Mobility',
+                duration: 12,
+                workSec: 30,
+                restSec: 30,
+                sets: 3,
+                exercises: ['goblet-squat', 'one-arm-row', 'windmill'],
+                title: { th: 'Core Armor & Mobility', en: 'Core Armor & Mobility', zh: '核心强化与关节灵活性' },
+                level: { th: 'ง่าย', en: 'Beginner', zh: '初级' },
+                desc: {
+                    th: 'เหมาะสำหรับผู้เริ่มต้น สร้างความมั่นคงให้แกนกลางและช่วงล่าง',
+                    en: 'Beginner-friendly session building core stability and hip health.',
+                    zh: '适合初学者，打造坚实核心并改善下肢灵活性。'
+                }
+            }
+        ];
+
+        window.userLogs = [];
+        let activeWorkoutState = null;
+        let workoutTimerInterval = null;
+
+        window.onload = function() {
+            lucide.createIcons();
+            changeLanguage(currentLang);
+            calculateKettlebellRecommendation(null);
+            renderPresetCards(PRESET_WORKOUTS);
+            renderLibrary(EXERCISE_DATABASE);
+            updateHistoryUI();
+        };
+
+        // UI Auth State Synchronizer
+        window.updateAuthUI = function(user) {
+            const btnLogin = document.getElementById('btn-google-login');
+            const panelUser = document.getElementById('user-logged-panel');
+            const imgAvatar = document.getElementById('user-avatar');
+            const txtName = document.getElementById('user-display-name');
+
+            if (user && !user.isAnonymous) {
+                if (btnLogin) btnLogin.classList.add('hidden');
+                if (panelUser) panelUser.classList.remove('hidden');
+                if (panelUser) panelUser.classList.add('flex');
+
+                if (user.photoURL && imgAvatar) {
+                    imgAvatar.src = user.photoURL;
+                    imgAvatar.classList.remove('hidden');
+                } else if (imgAvatar) {
+                    imgAvatar.classList.add('hidden');
+                }
+
+                if (txtName) txtName.innerText = user.displayName || user.email || 'User';
+            } else {
+                if (btnLogin) btnLogin.classList.remove('hidden');
+                if (panelUser) panelUser.classList.add('hidden');
+                if (panelUser) panelUser.classList.remove('flex');
+            }
+        };
+
+        // DYNAMIC LANGUAGE SWITCHING ENGINE
+        function changeLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('ironbell_lang', lang);
+
+            // Update Active Lang Buttons
+            ['th', 'en', 'zh'].forEach(l => {
+                const btn = document.getElementById(`lang-btn-${l}`);
+                if (btn) {
+                    if (l === lang) {
+                        btn.className = "px-2.5 py-1 rounded-lg transition bg-brand-orange text-white shadow";
+                    } else {
+                        btn.className = "px-2.5 py-1 rounded-lg transition text-slate-400 hover:text-white";
+                    }
+                }
+            });
+
+            // Update UI Static Text Elements
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (I18N[lang] && I18N[lang][key]) {
+                    el.innerText = I18N[lang][key];
+                }
+            });
+
+            // Update Placeholders
+            document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+                const key = el.getAttribute('data-i18n-ph');
+                if (I18N[lang] && I18N[lang][key]) {
+                    el.placeholder = I18N[lang][key];
+                }
+            });
+
+            // Re-render Dynamic Content
+            calculateKettlebellRecommendation(null);
+            renderPresetCards(PRESET_WORKOUTS);
+            renderLibrary(EXERCISE_DATABASE);
+            updateHistoryUI();
+            if (activeWorkoutState) updateActiveModalUI();
+        }
+
+        // TAB SWITCHING
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.getElementById(`tab-${tabId}`).classList.remove('hidden');
+
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                btn.classList.remove('text-brand-orange', 'bg-slate-800');
+                btn.classList.add('text-slate-400');
+            });
+            const activeBtn = document.getElementById(`nav-${tabId}`);
+            if (activeBtn) {
+                activeBtn.classList.add('text-brand-orange', 'bg-slate-800');
+                activeBtn.classList.remove('text-slate-400');
+            }
+
+            document.querySelectorAll('.mobile-nav-btn').forEach(btn => btn.classList.replace('text-brand-orange', 'text-slate-400'));
+            const mobileBtn = document.getElementById(`mobile-nav-${tabId}`);
+            if(mobileBtn) mobileBtn.classList.replace('text-slate-400', 'text-brand-orange');
+
+            if(tabId === 'history') renderChart();
+        }
+
+        // CALCULATOR ENGINE
+        function calculateKettlebellRecommendation(e) {
+            if(e) e.preventDefault();
+
+            const genderRadio = document.querySelector('input[name="gender"]:checked');
+            const gender = genderRadio ? genderRadio.value : 'male';
+            const weight = parseFloat(document.getElementById('user-weight').value) || 65;
+            const height = parseFloat(document.getElementById('user-height').value) || 170;
+            const exp = document.getElementById('user-experience').value;
+            const goal = document.getElementById('user-goal').value;
+
+            const heightM = height / 100;
+            const bmi = (weight / (heightM * heightM)).toFixed(1);
+
+            let lowerWeight = 8;
+            let upperWeight = 6;
+
+            if (gender === 'male') {
+                if (exp === 'beginner') { lowerWeight = 12; upperWeight = 8; }
+                else if (exp === 'intermediate') { lowerWeight = 16; upperWeight = 12; }
+                else { lowerWeight = 20; upperWeight = 16; }
+            } else {
+                if (exp === 'beginner') { lowerWeight = 8; upperWeight = 6; }
+                else if (exp === 'intermediate') { lowerWeight = 12; upperWeight = 8; }
+                else { lowerWeight = 16; upperWeight = 12; }
+            }
+
+            // Sync user physical profile to Firestore if form submitted
+            if (e && window.saveUserProfileToFirestore) {
+                window.saveUserProfileToFirestore({
+                    gender,
+                    weight,
+                    height,
+                    experience: exp,
+                    goal,
+                    recommendedLower: lowerWeight,
+                    recommendedUpper: upperWeight,
+                    updatedAt: Date.now()
+                });
+            }
+
+            const t = I18N[currentLang];
+            const resultContainer = document.getElementById('recommendation-result');
+
+            const tipFormatted = t.tipBody.replace('{lower}', lowerWeight).replace('{upper}', upperWeight);
+
+            resultContainer.innerHTML = `
+                <div class="bg-gradient-to-br from-slate-900 via-slate-900 to-slate-800 border border-brand-orange/40 p-6 rounded-2xl shadow-xl">
+                    <div class="flex items-center justify-between mb-4">
+                        <span class="text-xs font-extrabold uppercase tracking-widest text-brand-orange bg-brand-orange/10 px-3 py-1 rounded-full border border-brand-orange/20">${t.resultAnalysisTitle}</span>
+                        <span class="text-xs text-slate-400 font-mono">BMI: <strong class="text-white">${bmi}</strong></span>
+                    </div>
+
+                    <h3 class="text-lg font-bold text-white mb-3">${t.recommendedWeightHeader}</h3>
+
+                    <div class="grid grid-cols-2 gap-4 mb-5">
+                        <div class="bg-slate-950/80 p-4 rounded-xl border border-slate-800 text-center">
+                            <div class="text-xs text-slate-400 mb-1">${t.lblLowerBody}</div>
+                            <div class="text-3xl font-black text-brand-orange">${lowerWeight} <span class="text-base font-normal">kg</span></div>
+                        </div>
+                        <div class="bg-slate-950/80 p-4 rounded-xl border border-slate-800 text-center">
+                            <div class="text-xs text-slate-400 mb-1">${t.lblUpperBody}</div>
+                            <div class="text-3xl font-black text-brand-cyan">${upperWeight} <span class="text-base font-normal">kg</span></div>
+                        </div>
+                    </div>
+
+                    <div class="p-4 bg-slate-800/60 rounded-xl border border-slate-700/50 text-xs leading-relaxed text-slate-300">
+                        <strong class="text-amber-400 block mb-1">${t.tipHeader}</strong>
+                        ${tipFormatted}
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl">
+                    <h4 class="text-sm font-bold text-white mb-2 flex items-center gap-2">
+                        <i data-lucide="shield-alert" class="w-4 h-4 text-brand-orange"></i> ${t.warmupTitle}
+                    </h4>
+                    <ul class="text-xs text-slate-400 space-y-1.5 list-disc list-inside">
+                        <li>${t.warmup1}</li>
+                        <li>${t.warmup2}</li>
+                        <li>${t.warmup3}</li>
+                    </ul>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        // PRESET ROUTINES RENDERER
+        function renderPresetCards(list) {
+            const container = document.getElementById('preset-cards-container');
+            const t = I18N[currentLang];
+
+            container.innerHTML = list.map(p => {
+                const title = p.title[currentLang] || p.title['en'];
+                const desc = p.desc[currentLang] || p.desc['en'];
+                const lvl = p.level[currentLang] || p.level['en'];
+
+                return `
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-slate-700 transition flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                                p.level['en'] === 'Beginner' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
+                                p.level['en'] === 'Intermediate' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
+                                'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                            }">${lvl}</span>
+                            <span class="text-xs text-slate-400 font-mono flex items-center gap-1">
+                                <i data-lucide="clock" class="w-3.5 h-3.5 text-brand-cyan"></i> ${p.duration} ${t.unitMins}
+                            </span>
+                        </div>
+
+                        <h3 class="text-xl font-bold text-white mb-2">${title}</h3>
+                        <p class="text-xs text-slate-400 mb-4">${desc}</p>
+
+                        <div class="space-y-1.5 mb-6">
+                            <div class="flex flex-wrap gap-1.5">
+                                ${p.exercises.map(exId => {
+                                    const ex = EXERCISE_DATABASE.find(e => e.id === exId);
+                                    const exName = ex ? (ex.name[currentLang] || ex.name['en']) : exId;
+                                    return `<span class="text-[11px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700/50">${exName}</span>`;
+                                }).join('')}
+                            </div>
+                        </div>
+                    </div>
+
+                    <button onclick="startWorkoutRoutine('${p.id}')" class="w-full py-3 bg-brand-orange hover:bg-orange-600 text-white font-bold rounded-xl transition flex items-center justify-center gap-2 text-sm shadow">
+                        <i data-lucide="play" class="w-4 h-4 fill-current"></i> ${t.btnStartRoutine}
+                    </button>
+                </div>
+            `;
+            }).join('');
+            lucide.createIcons();
+        }
+
+        function filterPresets(cat) {
+            document.querySelectorAll('.preset-filter-btn').forEach(b => {
+                b.classList.replace('bg-brand-orange', 'bg-slate-800');
+                b.classList.replace('text-white', 'text-slate-300');
+            });
+            event.target.classList.replace('bg-slate-800', 'bg-brand-orange');
+            event.target.classList.replace('text-slate-300', 'text-white');
+
+            if(cat === 'all') renderPresetCards(PRESET_WORKOUTS);
+            else renderPresetCards(PRESET_WORKOUTS.filter(p => p.category === cat));
+        }
+
+        // LIBRARY RENDERER
+        function renderLibrary(items) {
+            const container = document.getElementById('library-cards-container');
+            const t = I18N[currentLang];
+
+            container.innerHTML = items.map(ex => {
+                const name = ex.name[currentLang] || ex.name['en'];
+                const muscles = (ex.muscles[currentLang] || ex.muscles['en']).join(', ');
+                const steps = ex.steps[currentLang] || ex.steps['en'];
+                const mistakes = ex.mistakes[currentLang] || ex.mistakes['en'];
+
+                return `
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-slate-700 transition flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="p-2 bg-slate-800 rounded-xl">
+                                ${ex.svgIcon}
+                            </div>
+                            <span class="text-xs font-bold px-2.5 py-1 rounded-md bg-slate-800 text-slate-300 border border-slate-700">${ex.category}</span>
+                        </div>
+
+                        <h3 class="text-lg font-bold text-white mb-1">${name}</h3>
+                        <p class="text-xs text-brand-cyan font-semibold mb-4">${t.lblMuscles} ${muscles}</p>
+
+                        <div class="space-y-3">
+                            <div>
+                                <div class="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">${t.lblSteps}</div>
+                                <ol class="list-decimal list-inside text-xs text-slate-400 space-y-1">
+                                    ${steps.map(step => `<li>${step}</li>`).join('')}
+                                </ol>
+                            </div>
+
+                            <div class="pt-2 border-t border-slate-800">
+                                <div class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-1">${t.lblMistakes}</div>
+                                <ul class="list-disc list-inside text-xs text-slate-400 space-y-0.5">
+                                    ${mistakes.map(m => `<li>${m}</li>`).join('')}
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            }).join('');
+            lucide.createIcons();
+        }
+
+        function filterLibrary() {
+            const q = document.getElementById('library-search').value.toLowerCase();
+            const filtered = EXERCISE_DATABASE.filter(ex => {
+                const name = (ex.name[currentLang] || '').toLowerCase();
+                const muscles = (ex.muscles[currentLang] || []).join(' ').toLowerCase();
+                return name.includes(q) || muscles.includes(q);
+            });
+            renderLibrary(filtered);
+        }
+
+        function filterLibraryCategory(cat) {
+            document.querySelectorAll('.lib-cat-btn').forEach(b => {
+                b.classList.replace('bg-brand-orange', 'bg-slate-800');
+                b.classList.replace('text-white', 'text-slate-300');
+            });
+            event.target.classList.replace('bg-slate-800', 'bg-brand-orange');
+            event.target.classList.replace('text-slate-300', 'text-white');
+
+            if(cat === 'all') renderLibrary(EXERCISE_DATABASE);
+            else renderLibrary(EXERCISE_DATABASE.filter(e => e.category.includes(cat)));
+        }
+
+        // INTERACTIVE WORKOUT TIMER ENGINE
+        function startWorkoutRoutine(routineId) {
+            const routine = PRESET_WORKOUTS.find(p => p.id === routineId);
+            if (!routine) return;
+
+            const timeline = [];
+            for (let s = 1; s <= routine.sets; s++) {
+                routine.exercises.forEach((exId) => {
+                    const exObj = EXERCISE_DATABASE.find(e => e.id === exId) || EXERCISE_DATABASE[0];
+                    timeline.push({
+                        setNumber: s,
+                        totalSets: routine.sets,
+                        exercise: exObj,
+                        workSec: routine.workSec,
+                        restSec: routine.restSec
+                    });
+                });
+            }
+
+            activeWorkoutState = {
+                routineTitle: routine.title,
+                timeline: timeline,
+                currentIndex: 0,
+                phase: 'WORK',
+                secondsLeft: timeline[0].workSec,
+                totalIntervalSec: timeline[0].workSec,
+                isPaused: false,
+                totalRepsLogged: 0,
+                currentExRepCount: 0
+            };
+
+            document.getElementById('active-workout-modal').classList.remove('hidden');
+            updateActiveModalUI();
+            startTimerLoop();
+        }
+
+        function startTimerLoop() {
+            clearInterval(workoutTimerInterval);
+            workoutTimerInterval = setInterval(() => {
+                if (!activeWorkoutState || activeWorkoutState.isPaused) return;
+
+                if (activeWorkoutState.secondsLeft > 0) {
+                    activeWorkoutState.secondsLeft--;
+                    updateTimerUI();
+
+                    if (activeWorkoutState.secondsLeft <= 3 && activeWorkoutState.secondsLeft > 0) {
+                        playBeep(700, 'sine', 0.1);
+                    }
+                } else {
+                    playBeep(1000, 'square', 0.3);
+                    if (activeWorkoutState.phase === 'WORK') {
+                        activeWorkoutState.totalRepsLogged += activeWorkoutState.currentExRepCount;
+                        activeWorkoutState.currentExRepCount = 0;
+
+                        activeWorkoutState.phase = 'REST';
+                        activeWorkoutState.secondsLeft = activeWorkoutState.timeline[activeWorkoutState.currentIndex].restSec;
+                        activeWorkoutState.totalIntervalSec = activeWorkoutState.secondsLeft;
+                    } else {
+                        activeWorkoutState.currentIndex++;
+                        if (activeWorkoutState.currentIndex < activeWorkoutState.timeline.length) {
+                            activeWorkoutState.phase = 'WORK';
+                            activeWorkoutState.secondsLeft = activeWorkoutState.timeline[activeWorkoutState.currentIndex].workSec;
+                            activeWorkoutState.totalIntervalSec = activeWorkoutState.secondsLeft;
+                        } else {
+                            finishWorkout();
+                            return;
+                        }
+                    }
+                    updateActiveModalUI();
+                }
+            }, 1000);
+        }
+
+        function updateActiveModalUI() {
+            if (!activeWorkoutState) return;
+            const currentItem = activeWorkoutState.timeline[activeWorkoutState.currentIndex];
+            const t = I18N[currentLang];
+
+            const title = activeWorkoutState.routineTitle[currentLang] || activeWorkoutState.routineTitle['en'];
+            document.getElementById('modal-workout-title').innerText = title;
+            document.getElementById('modal-set-badge').innerText = `Set ${currentItem.setNumber}/${currentItem.totalSets}`;
+
+            const banner = document.getElementById('workout-phase-banner');
+            if (activeWorkoutState.phase === 'WORK') {
+                banner.innerText = t.phaseWork;
+                banner.className = "px-6 py-1.5 rounded-full font-black text-xs sm:text-sm uppercase tracking-widest bg-brand-orange/20 text-brand-orange border border-brand-orange/30 mb-4 animate-pulse";
+            } else {
+                banner.innerText = t.phaseRest;
+                banner.className = "px-6 py-1.5 rounded-full font-black text-xs sm:text-sm uppercase tracking-widest bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/30 mb-4 animate-pulse";
+            }
+
+            const exName = currentItem.exercise.name[currentLang] || currentItem.exercise.name['en'];
+            const muscles = (currentItem.exercise.muscles[currentLang] || currentItem.exercise.muscles['en']).join(', ');
+            const steps = currentItem.exercise.steps[currentLang] || currentItem.exercise.steps['en'];
+
+            document.getElementById('active-exercise-name').innerText = activeWorkoutState.phase === 'REST' ? t.phaseRestTitle : exName;
+            document.getElementById('active-exercise-target').innerText = `${t.lblMuscles} ${muscles}`;
+            document.getElementById('active-exercise-icon').innerHTML = currentItem.exercise.svgIcon;
+            document.getElementById('active-target-reps').innerText = `${currentItem.exercise.targetReps} ${t.unitReps}`;
+            document.getElementById('active-rep-count').innerText = activeWorkoutState.currentExRepCount;
+            document.getElementById('active-form-cue').innerText = steps[0];
+
+            updateTimerUI();
+            lucide.createIcons();
+        }
+
+        function updateTimerUI() {
+            document.getElementById('timer-seconds').innerText = activeWorkoutState.secondsLeft;
+
+            const circle = document.getElementById('timer-progress-ring');
+            const radius = circle.r.baseVal.value;
+            const circumference = 2 * Math.PI * radius;
+            const percent = activeWorkoutState.secondsLeft / activeWorkoutState.totalIntervalSec;
+            const offset = circumference - (percent * circumference);
+            circle.style.strokeDashoffset = offset;
+
+            if (activeWorkoutState.phase === 'WORK') {
+                circle.classList.remove('text-brand-cyan');
+                circle.classList.add('text-brand-orange');
+            } else {
+                circle.classList.remove('text-brand-orange');
+                circle.classList.add('text-brand-cyan');
+            }
+        }
+
+        function togglePauseWorkout() {
+            activeWorkoutState.isPaused = !activeWorkoutState.isPaused;
+            const t = I18N[currentLang];
+            const btnText = document.getElementById('pause-btn-text');
+            btnText.innerText = activeWorkoutState.isPaused ? t.btnResume : t.btnPause;
+        }
+
+        function adjustRepCount(delta) {
+            activeWorkoutState.currentExRepCount = Math.max(0, activeWorkoutState.currentExRepCount + delta);
+            document.getElementById('active-rep-count').innerText = activeWorkoutState.currentExRepCount;
+        }
+
+        function skipExercise(direction) {
+            const nextIdx = activeWorkoutState.currentIndex + direction;
+            if (nextIdx >= 0 && nextIdx < activeWorkoutState.timeline.length) {
+                activeWorkoutState.currentIndex = nextIdx;
+                activeWorkoutState.phase = 'WORK';
+                activeWorkoutState.secondsLeft = activeWorkoutState.timeline[nextIdx].workSec;
+                activeWorkoutState.totalIntervalSec = activeWorkoutState.secondsLeft;
+                activeWorkoutState.currentExRepCount = 0;
+                updateActiveModalUI();
+            }
+        }
+
+        function confirmExitWorkout() {
+            if (confirm("Exit workout routine?")) {
+                clearInterval(workoutTimerInterval);
+                document.getElementById('active-workout-modal').classList.add('hidden');
+                activeWorkoutState = null;
+            }
+        }
+
+        function finishWorkout() {
+            clearInterval(workoutTimerInterval);
+            
+            const totalDuration = Math.round(activeWorkoutState.timeline.reduce((acc, curr) => acc + curr.workSec + curr.restSec, 0) / 60);
+            const estimatedReps = activeWorkoutState.totalRepsLogged > 0 ? activeWorkoutState.totalRepsLogged : activeWorkoutState.timeline.length * 12;
+            const totalVol = estimatedReps * 12;
+
+            const title = activeWorkoutState.routineTitle[currentLang] || activeWorkoutState.routineTitle['en'];
+
+            const newLog = {
+                date: new Date().toLocaleDateString(),
+                title: title,
+                duration: totalDuration,
+                reps: estimatedReps,
+                volume: totalVol,
+                kbUsed: "12 - 16 kg"
+            };
+
+            if (window.saveLogToFirestore) {
+                window.saveLogToFirestore(newLog);
+            }
+
+            document.getElementById('active-workout-modal').classList.add('hidden');
+            activeWorkoutState = null;
+
+            switchTab('history');
+        }
+
+        // STATS & LOGS ENGINE
+        function updateHistoryUI() {
+            const t = I18N[currentLang];
+            const logs = window.userLogs || [];
+
+            const totalWorkouts = logs.length;
+            const totalVolume = logs.reduce((acc, log) => acc + (log.volume || 0), 0);
+            const totalTime = logs.reduce((acc, log) => acc + (log.duration || 0), 0);
+            const streak = totalWorkouts > 0 ? Math.min(totalWorkouts, 7) : 0;
+
+            document.getElementById('stat-total-workouts').innerText = `${totalWorkouts}`;
+            document.getElementById('stat-streak').innerText = `${streak} ${t.unitDays}`;
+            document.getElementById('stat-total-volume').innerText = `${totalVolume.toLocaleString()} kg`;
+            document.getElementById('stat-total-time').innerText = `${totalTime} ${t.unitMins}`;
+
+            const tbody = document.getElementById('history-table-body');
+            if (logs.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-slate-500">No workout records synced yet. Select a routine to begin!</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = logs.map(log => `
+                <tr class="hover:bg-slate-800/40">
+                    <td class="p-3 font-mono text-slate-400 text-xs">${log.date || 'Today'}</td>
+                    <td class="p-3 font-bold text-white">${log.title}</td>
+                    <td class="p-3 text-slate-300">${log.duration} ${t.unitMins}</td>
+                    <td class="p-3 text-brand-orange font-mono font-bold">${log.reps} ${t.unitReps}</td>
+                    <td class="p-3 text-slate-400">${log.kbUsed}</td>
+                </tr>
+            `).join('');
+        }
+
+        function clearHistory() {
+            if (confirm("Clear all workout history from cloud storage?")) {
+                if (window.clearFirestoreLogs) {
+                    window.clearFirestoreLogs();
+                }
+            }
+        }
+
+        let chartInstance = null;
+        function renderChart() {
+            const ctx = document.getElementById('historyChart');
+            if (!ctx) return;
+
+            if (chartInstance) chartInstance.destroy();
+
+            const logs = window.userLogs || [];
+            const lastSessions = logs.slice(0, 7).reverse();
+            const labels = lastSessions.length > 0 ? lastSessions.map((_, i) => `#${i+1}`) : ['#1', '#2', '#3'];
+            const data = lastSessions.length > 0 ? lastSessions.map(s => s.duration) : [0, 0, 0];
+
+            chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Minutes',
+                        data: data,
+                        backgroundColor: '#FF5722',
+                        borderRadius: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: '#64748b' } },
+                        y: { grid: { color: '#1e293b' }, ticks: { color: '#64748b' } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
